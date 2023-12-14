@@ -462,7 +462,7 @@ def copy_template_multimer_para(block_fast, block_ori):
 def inject_autochunk(model):
     print("Entered inject autochunk")
     model = get_model().cpu().eval()
-    meta_args, concrete_args = get_data(128, 50)
+    meta_args, concrete_args = get_data(10, 10)
     if concrete_args is None:
         concrete_args = []
 
@@ -490,53 +490,29 @@ def inject_autochunk(model):
     gm = ColoGraphModule(model, graph, ckpt_codegen=False)
     gm.recompile()
 
-    model.evoformer = model
+    model.evoformer = gm
 
 
 # TODO: change fast module to the gm
 def inject_evoformer(model):
-    print("Injected fast evoformer")
     with torch.no_grad():
         target_module = model.evoformer
-        # TODO: insert autochunkcode gen here by modifying fast_module
-        # Do this before converting to the fast_fold
-
-        model = target_module.cpu().eval()
-        meta_args, concrete_args = get_data(1, 1)
-        if concrete_args is None:
-            concrete_args = []
-        meta_graph = symbolic_trace(
-            model,
-            meta_args={k: v.to(torch.device("meta")) for k, v in meta_args},
-            concrete_args={k: v for k, v in concrete_args},
+        fast_module = EvoformerStack(
+            c_m=target_module.blocks[0].msa_att_row.c_in,
+            c_z=target_module.blocks[0].msa_att_row.c_z,
+            c_s=target_module.linear.out_features,
+            no_blocks=len(target_module.blocks),
+            blocks_per_ckpt=target_module.blocks_per_ckpt,
+            clear_cache_between_blocks=target_module.clear_cache_between_blocks,
+            is_multimer=target_module.blocks[0].is_multimer,
         )
-        interp = MetaInfoProp(meta_graph)
-        meta_tensors = [MetaTensor(i[1], fake_device="cpu") for i in meta_args] + [i[1] for i in concrete_args]
+        for target_block, fast_block in zip(target_module.blocks, fast_module.blocks):
+            copy_evoformer_para(fast_block, target_block)
+            if target_block.training == False:
+                fast_block.eval()
+        copy_linear(fast_module.linear, target_module.linear)
+        model.evoformer = fast_module
 
-        print(f"\nfastfold's interp\n")
-        print(interp)
-
-        print(f"\nfastfold's meta_tensors\n")
-        print(meta_tensors)
-
-        # nterp.propagate(*meta_tensors)
-
-        # fast_module = EvoformerStack(
-        #     c_m=target_module.blocks[0].msa_att_row.c_in,
-        #     c_z=target_module.blocks[0].msa_att_row.c_z,
-        #     c_s=target_module.linear.out_features,
-        #     no_blocks=len(target_module.blocks),
-        #     blocks_per_ckpt=target_module.blocks_per_ckpt,
-        #     clear_cache_between_blocks=target_module.clear_cache_between_blocks,
-        #     is_multimer=target_module.blocks[0].is_multimer,
-        # )
-        # # copy parameters from target block (original blocks) to the fast blocks
-        # for target_block, fast_block in zip(target_module.blocks, fast_module.blocks):
-        #     copy_evoformer_para(fast_block, target_block)
-        #     if target_block.training == False:
-        #         fast_block.eval()
-        # copy_linear(fast_module.linear, target_module.linear)
-        model.evoformer = target_module
 
 
 def inject_extramsa(model):
